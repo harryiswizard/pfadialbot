@@ -1,0 +1,70 @@
+name: poll
+
+# The dials bot, always on. One run answers Telegram commands and keeps the
+# Trellus call cache warm for ~5h45m (GitHub's job cap is 6h), saves state,
+# then dispatches its own successor. watchdog.yml restarts the chain if it
+# breaks. Only one run may hold Telegram's getUpdates at a time, so a new run
+# cancels the old one. Public repo, so the minutes are free.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["*.py", ".github/workflows/poll.yml"]
+
+concurrency:
+  group: dials-bot-poll
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: write          # to dispatch the next run
+
+jobs:
+  poll:
+    if: vars.DIALS_BOT_ON_GITHUB == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # State (call cache, Telegram offset, allowed chats) lives in the Actions
+      # cache, never in the repo. A cold cache backfills from Trellus (~2 min).
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: dials-bot-state-v1-${{ github.run_id }}
+          restore-keys: dials-bot-state-v1-
+
+      - name: Run the bot
+        env:
+          DIALS_STATE_DIR: state
+          DIALS_CONFIG_JSON: ${{ vars.DIALS_CONFIG_JSON }}
+          TRELLUS_TOKEN: ${{ secrets.TRELLUS_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          # Owner DM; the group is allowed and the bot is pinned to its Dials topic.
+          TELEGRAM_CHAT_ID: "5680104831"
+          TELEGRAM_ALLOWED: "-1004435246978"
+          TELEGRAM_HOME: "-1004435246978:1853"
+          RUN_SECONDS: "20700"
+        run: |
+          [ -f state/dials.db ] || python3 dials_bot.py --sync
+          python3 dials_bot.py
+
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: dials-bot-state-v1-${{ github.run_id }}
+
+      # Last on purpose: the successor cancels whatever is still running.
+      - name: Start the next run
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run poll.yml --repo ${{ github.repository }} --ref main

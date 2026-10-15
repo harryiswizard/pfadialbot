@@ -1,0 +1,30 @@
+name: watchdog
+
+# Restarts the poll chain if it has stopped. GitHub delays scheduled runs under
+# load, so this is a safety net, not the heartbeat: poll.yml restarts itself.
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  check:
+    if: vars.DIALS_BOT_ON_GITHUB == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Start poll if nothing is running
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          live=$(gh run list --repo ${{ github.repository }} --workflow poll.yml \
+                   --limit 5 --json status --jq '[.[] | select(.status != "completed")] | length')
+          if [ "$live" = "0" ]; then
+            echo "poll chain is down; restarting"
+            gh workflow run poll.yml --repo ${{ github.repository }} --ref main
+          else
+            echo "poll is running ($live active)"
+          fi

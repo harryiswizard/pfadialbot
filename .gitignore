@@ -1,0 +1,11 @@
+# Code only — this repo is public. Call data, keys and rep config never go in.
+*
+!.gitignore
+!dials_bot.py
+!dials_core.py
+!dials_report.py
+!setup_bot.py
+!README.md
+!.github/
+!.github/workflows/
+!.github/workflows/*.yml
