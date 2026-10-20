@@ -295,12 +295,17 @@ def roster():
     Refreshed from /visible on every sync, so new Trellus users appear without
     a config change; config.json "bdrs" only overrides display names."""
     conn = db()
-    rows = list(conn.execute("SELECT id, name FROM owners ORDER BY name"))
+    rows = list(conn.execute("SELECT id, name, email FROM owners ORDER BY name"))
     conn.close()
     team = (CFG.get("teams") or [{"name": "Team"}])[0]["name"]
     skip = set(str(x) for x in CFG.get("exclude", []))
+    # exclude_names: drop anyone whose name or email contains one of these.
+    bad = [str(x).lower() for x in CFG.get("exclude_names", []) if x]
+    def dropped(r):
+        text = ((r["name"] or "") + " " + (r["email"] or "")).lower()
+        return r["id"] in skip or any(b in text for b in bad)
     return [{"name": r["name"], "owner_id": r["id"], "team": team}
-            for r in rows if r["id"] not in skip]
+            for r in rows if not dropped(r)]
 
 
 def bdr_ids():
