@@ -74,6 +74,11 @@ TZ = ZoneInfo(CFG["timezone"])
 RPT = "https://rpt-2.trellus.ai"
 EXT = "https://ext.trellus.ai"
 
+# Never on the dials board (2026-11-05, Harry's ask).
+ALWAYS_EXCLUDE = ["yusef", "harry", "ayush", "dinesh"]
+# A redial of the same number by the same rep within this many seconds is one dial.
+REDIAL_WINDOW_S = 120
+
 
 def tr_token():
     if os.environ.get("TRELLUS_TOKEN"):
@@ -300,17 +305,58 @@ def roster():
     team = (CFG.get("teams") or [{"name": "Team"}])[0]["name"]
     skip = set(str(x) for x in CFG.get("exclude", []))
     # exclude_names: drop anyone whose name or email contains one of these.
-    bad = [str(x).lower() for x in CFG.get("exclude_names", []) if x]
+    # ALWAYS_EXCLUDE applies even if the GitHub config variable is older.
+    bad = [str(x).lower() for x in list(CFG.get("exclude_names", [])) + ALWAYS_EXCLUDE if x]
     def dropped(r):
         text = ((r["name"] or "") + " " + (r["email"] or "")).lower()
         return r["id"] in skip or any(b in text for b in bad)
-    return [{"name": r["name"], "owner_id": r["id"], "team": team}
-            for r in rows if not dropped(r)]
+    # One row per name: a rep with two Trellus ids is listed once.
+    out, seen = [], set()
+    for r in rows:
+        if dropped(r) or (r["name"] or "").lower() in seen:
+            continue
+        seen.add((r["name"] or "").lower())
+        out.append({"name": r["name"], "owner_id": r["id"], "team": team})
+    return out
+
+
+def roster_ids():
+    """Every owner id behind a roster name (covers reps with two Trellus ids)."""
+    names = set(b["name"].lower() for b in roster())
+    conn = db()
+    ids = set(r["id"] for r in conn.execute("SELECT id, name FROM owners")
+              if (r["name"] or "").lower() in names)
+    conn.close()
+    return ids
+
+
+def _call_rank(r):
+    key = norm_label(r["disposition"])
+    return (key in MEETING_LABELS, key in CONVO_LABELS, key in CONNECT_LABELS,
+            r["duration_ms"] or 0)
+
+
+def dedupe_calls(rows):
+    """Count a quick redial of the same number by the same rep as one dial.
+    Calls within REDIAL_WINDOW_S of the previous one collapse into a single
+    call that keeps the best outcome."""
+    rows = sorted(rows, key=lambda r: (r["owner_id"] or "", r["to_number"] or "", r["ts_ms"]))
+    out, prev = [], None
+    for r in rows:
+        if (prev is not None and r["to_number"] and r["owner_id"] == prev["owner_id"]
+                and r["to_number"] == prev["to_number"]
+                and r["ts_ms"] - prev["ts_ms"] <= REDIAL_WINDOW_S * 1000):
+            if _call_rank(r) > _call_rank(out[-1]):
+                out[-1] = r
+        else:
+            out.append(r)
+        prev = r
+    return out
 
 
 def bdr_ids():
     """Owner ids of the dial team, or empty set if nothing has synced yet."""
-    return set(str(b["owner_id"]) for b in roster())
+    return roster_ids()
 
 
 def bdr_names():
@@ -335,7 +381,7 @@ def stats(conn, start_ms, end_ms, owner_id=None, cutoff_ms=None, owner_ids=None)
     """Aggregate outbound dials in a window. `cutoff_ms` trims to a time-of-day
     for like-for-like pace comparisons; `owner_ids` limits to a roster."""
     owners = _maps(conn)
-    q = ("SELECT id, owner_id, disposition, duration_ms, ts_ms FROM calls "
+    q = ("SELECT id, owner_id, disposition, duration_ms, ts_ms, to_number FROM calls "
          "WHERE ts_ms>=? AND ts_ms<? AND direction='OUTBOUND'")
     args = [start_ms, end_ms]
     if owner_id:
@@ -351,7 +397,7 @@ def stats(conn, start_ms, end_ms, owner_id=None, cutoff_ms=None, owner_ids=None)
 
     per_rep, per_disp = {}, {}
     totals = {"dials": 0, "connects": 0, "convos": 0, "meetings": 0, "talk_ms": 0}
-    for r in conn.execute(q, args):
+    for r in dedupe_calls(conn.execute(q, args)):
         key = norm_label(r["disposition"])
         label = key.capitalize() if key else "(none)"
         live = (not r["id"].startswith("hs:")
@@ -386,7 +432,8 @@ def daily_series(conn, start_ms, end_ms, owner_id=None, owner_ids=None):
         rows[d] = 0
         d += timedelta(days=1)
 
-    q = ("SELECT ts_ms FROM calls WHERE ts_ms>=? AND ts_ms<? AND direction='OUTBOUND'")
+    q = ("SELECT ts_ms, owner_id, to_number, disposition, duration_ms FROM calls "
+         "WHERE ts_ms>=? AND ts_ms<? AND direction='OUTBOUND'")
     args = [start_ms, end_ms]
     if owner_id:
         q += " AND owner_id=?"
@@ -395,7 +442,7 @@ def daily_series(conn, start_ms, end_ms, owner_id=None, owner_ids=None):
         ids = list(owner_ids)
         q += " AND owner_id IN (%s)" % ",".join("?" * len(ids))
         args.extend(ids)
-    for r in conn.execute(q, args):
+    for r in dedupe_calls(conn.execute(q, args)):
         day = datetime.fromtimestamp(r["ts_ms"] / 1000, TZ).date()
         rows[day] = rows.get(day, 0) + 1
     return sorted(rows.items())
