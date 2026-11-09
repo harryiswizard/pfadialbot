@@ -75,7 +75,9 @@ RPT = "https://rpt-2.trellus.ai"
 EXT = "https://ext.trellus.ai"
 
 # Never on the dials board (2026-11-05, Harry's ask).
-ALWAYS_EXCLUDE = ["yusef", "harry", "ayush", "dinesh"]
+ALWAYS_EXCLUDE = ["yusef", "harry", "ayush", "dinesh", "kavaiya", "jay@corgi"]   # 2026-11-09: Jay + Ayush left
+# Trellus profile typos -> real names (2026-11-09).
+NAME_FIX = {"8d1461fa0347469794aee7d526e11944": "Fin Knapp"}
 # A redial of the same number by the same rep within this many seconds is one dial.
 REDIAL_WINDOW_S = 120
 
@@ -175,6 +177,7 @@ def refresh_lookups(conn, token=None):
     # Roster names win, so reports match config.json rather than Trellus profiles.
     conn.executemany("UPDATE owners SET name=? WHERE id=?",
                      [(b["name"], str(b["owner_id"])) for b in CFG.get("bdrs", []) if b.get("name")])
+    conn.executemany("UPDATE owners SET name=? WHERE id=?", [(n, i) for i, n in NAME_FIX.items()])
     conn.commit()
 
 
